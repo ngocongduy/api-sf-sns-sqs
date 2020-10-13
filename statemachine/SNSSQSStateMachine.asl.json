@@ -1,0 +1,44 @@
+{
+  "Comment": "Step functions with SNS and SQS",
+  "StartAt": "TriggerSNSSQS",
+  "States": {
+    "TriggerSNSSQS": {
+      "Type": "Task",
+      "Resource": "${SNSTriggerFunctionArn}",
+      "ResultPath": "$.triggerSNSResult",
+      "Next": "EvaluateResult"
+    },
+    "EvaluateResult": {
+      "Type" : "Choice",
+      "Choices": [
+        {
+          "Variable": "$.triggerSNSResult.success",
+          "StringEquals": "SUCCESS",
+          "Next": "SuccessState"
+        },
+        {
+          "Variable": "$.triggerSNSResult.success",
+          "StringEquals": "FAILURE",
+          "Next": "FailedState"
+        }
+      ],
+      "Default": "ErrorState"
+    },
+
+    "SuccessState": {
+      "Type" : "Task",
+      "Resource": "${ReadResultRDSDatabaseArn}",
+      "End": true
+    },
+    "FailedState": {
+      "Type" : "Fail"
+    },
+
+    "ErrorState": {
+      "Type": "Fail",
+      "Error": "DefaultStateError",
+      "Cause": "Error happened!"
+    }
+  }
+}
+

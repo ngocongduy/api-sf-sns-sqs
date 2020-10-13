@@ -1,0 +1,391 @@
+Transform: AWS::Serverless-2016-10-31
+
+Description: API -> Step functions with SNS + SQS + Lambda
+
+Parameters:
+  CorsOrigin:
+    Description: Header Access-Control-Allow-Origin
+    Default: "'http://localhost:3000'"
+    Type: String
+  CorsMethods:
+    Description: Header Access-Control-Allow-Headers
+    Default: "'*'"
+    Type: String
+  CorsHeaders:
+    Description: Header Access-Control-Allow-Headers
+    Default: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+    Type: String
+  SwaggerS3File:
+    Description: 'S3 "swagger.yaml" file location'
+    Default: "./swagger.yaml"
+    Type: String
+
+Globals:
+  Function:
+    Timeout: 15
+    Runtime: java11
+    MemorySize: 512
+
+Resources:
+  LambdaRoleForRuleExecution:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'sts:AssumeRole'
+            Principal:
+              Service: lambda.amazonaws.com
+      Policies:
+        - PolicyName: WriteCloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+        - PolicyName: FullAccessSNS
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sns:*'
+                Resource: '*'              
+
+  LambdaRoleForRuleExecutionAndSQS:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-lambda-role-sqs
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'sts:AssumeRole'
+            Principal:
+              Service: lambda.amazonaws.com
+      Policies:
+        - PolicyName: WriteCloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+        - PolicyName: SQSAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:GetQueueAttributes
+                  - sqs:DeleteMessage
+                  - sqs:ReceiveMessage
+                Resource: arn:aws:sqs:*:*:*
+
+  ApiGatewayStepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: !Join ["", ["/", !Ref "AWS::StackName", "/"]]
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowApiGatewayServiceToAssumeRole
+            Effect: Allow
+            Action:
+              - 'sts:AssumeRole'
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+      Policies:
+        - PolicyName: CallStepFunctions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'states:StartExecution'
+                Resource:
+                  - !Ref SNSSQSStateMachine
+        - PolicyName: RetriveDataFromStepFunction
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'states:GetExecutionHistory'
+                  - 'states:DescribeExecution'
+                Resource: "arn:aws:states:*:*:execution:*:*"
+
+  StateExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: "StatesExecutionPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action: "lambda:InvokeFunction"
+                Resource:
+                  - !GetAtt SNSTriggerFunction.Arn
+                  - !GetAtt ReadResultRDSDatabaseFunction.Arn
+        - PolicyName: WriteCloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  SNSSQSStateMachine:
+    Type: AWS::Serverless::StateMachine # More info about State Machine Resource: https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-statemachine.html
+    Properties:
+      DefinitionUri: statemachine/SNSSQSStateMachine.asl.json
+      DefinitionSubstitutions:
+        SNSTriggerFunctionArn: !GetAtt SNSTriggerFunction.Arn
+        ReadResultRDSDatabaseArn: !GetAtt ReadResultRDSDatabaseFunction.Arn
+      #StateMachineName: !Sub ${AWS::StackName}-state-machine
+      Role: !GetAtt [ StateExecutionRole, Arn ]
+      Events:
+        TriggerAPI:
+          Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+          Properties: 
+            Path: /execute
+            Method: post
+            RestApiId: !Ref StateMachineTriggerAPI
+            #Auth: no specified means api key required set as default
+
+#      Policies: # Find out more about SAM policy templates: https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-policy-templates.html
+#        - LambdaInvokePolicy:
+#            FunctionName: !Ref SNSTriggerFunction
+#		 - LambdaInvokePolicy:
+#            FunctionName: !Ref ReadResultRDSDatabaseFunction
+
+  #### SNS, SQS resources
+  ### PART ONE: Create SNS Topic and SQS Queues
+  # Create our SNS Topic
+  SnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: SnsTopic #${self:service}-${self:provider.stage}-SnsTopic
+
+  # Create our 'firstQueue' SQS queue
+  QueueCallAPI:
+    Type: "AWS::SQS::Queue"
+    Properties:
+      QueueName: QueueCallAPI
+      MessageRetentionPeriod: 100
+      DelaySeconds: 0
+      #FifoQueue: true
+
+  # Create our 'secondQueue' SQS queue
+  QueueRDSDatabase:
+    Type: "AWS::SQS::Queue"
+    Properties:
+      QueueName: QueueRDSDatabase
+      MessageRetentionPeriod: 100
+      DelaySeconds: 0
+      #FifoQueue: true
+    #MaximumMessageSize: Interger
+    #ContentBasedDeduplication: Boolean
+    #KmsDataKeyReusePeriodSeconds: Integer
+    #KmsMasterKeyId: String
+    #ReceiveMessageWaitTimeSeconds: Integer
+      #QueueName: ${self:service}-${self:provider.stage}-RDSDatabase
+      #RedrivePolicy:
+      #  deadLetterTargetArn: !GetAtt
+      #    - QueueRDSDatabaseDLQ
+      #    - Arn
+      #  maxReceiveCount: 3
+    #Tags: 
+    #  - Tag
+    #VisibilityTimeout: Integer
+
+  ### PART TWO: Create SQS Queue Policies
+
+  # Create our queue policy for the 'firstQueue'
+  SNSToQueueCallAPIPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "allow-sns-messages-api"
+            Effect: Allow
+            Principal: "*"
+            Resource: !GetAtt
+              - QueueCallAPI
+              - Arn
+            Action: "SQS:SendMessage"
+            Condition:
+              ArnEquals:
+                "aws:SourceArn": !Ref SnsTopic
+      Queues:
+        - Ref: QueueCallAPI
+
+  # Create our queue policy for the 'secondQueue'
+  SNSToQueueRDSDatabasePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "allow-sns-messages-rds"
+            Effect: Allow
+            Principal: "*"
+            Resource: !GetAtt
+              - QueueRDSDatabase
+              - Arn
+            Action: "SQS:SendMessage"
+            Condition:
+              ArnEquals:
+                "aws:SourceArn": !Ref SnsTopic
+      Queues:
+        - Ref: QueueRDSDatabase
+
+
+  ### PART THREE: Subscribe our SQS Queues to our SNS Topic
+
+  # Create the subscription to the 'firstQueue'
+  CallAPIQueueSubscription:
+    Type: 'AWS::SNS::Subscription'
+    Properties:
+      TopicArn: !Ref SnsTopic
+      Endpoint: !GetAtt
+        - QueueCallAPI
+        - Arn
+      Protocol: sqs
+      RawMessageDelivery: 'true'
+
+  # Create the subscription to the 'secondQueue'
+  RDSDatabaseQueueSubscription:
+    Type: 'AWS::SNS::Subscription'
+    Properties:
+      TopicArn: !Ref SnsTopic
+      Endpoint: !GetAtt
+        - QueueRDSDatabase
+        - Arn
+      Protocol: sqs
+      RawMessageDelivery: 'true'
+
+  # EventMappingCallAPIQueue:
+  #   Type: AWS::Lambda::EventSourceMapping
+  #   Properties: 
+  #     BatchSize: 1
+  #     Enabled: true
+  #     EventSourceArn: !GetAtt QueueCallAPI.Arn
+  #     FunctionName: !GetAtt CallAPIFunction.Arn
+      #BisectBatchOnFunctionError: Boolean
+      #DestinationConfig: 
+      #  DestinationConfig
+      #MaximumBatchingWindowInSeconds: Integer
+      #MaximumRecordAgeInSeconds: Integer
+      #MaximumRetryAttempts: Integer
+      #ParallelizationFactor: Integer
+      #StartingPosition: String
+      #Topics: 
+      #  - String
+  # EventMappingRDSDatabase:
+  #   Type: AWS::Lambda::EventSourceMapping
+  #   Properties: 
+  #     BatchSize: 1
+  #     Enabled: true
+  #     EventSourceArn: !GetAtt QueueRDSDatabase.Arn
+  #     FunctionName: !GetAtt RDSDatabaseFunction.Arn
+
+# These function belong to state machine
+  SNSTriggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-trigger-state-machine
+      CodeUri: functions/SNSTrigger
+      Handler: SNSTrigger.src.main.java.snsTrigger.App::handleRequest
+      Role: !GetAtt LambdaRoleForRuleExecution.Arn
+      Timeout: 20
+  ReadResultRDSDatabaseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-read-result-rds
+      CodeUri: functions/ReadResultRDS
+      Handler: ReadResultRDS.src.main.java.readResultRDS.App::handleRequest
+      Role: !GetAtt LambdaRoleForRuleExecution.Arn
+      Timeout: 10
+
+  CallAPIFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-call-api
+      CodeUri: functions/CallAPI
+      Handler: CallAPI.src.main.java.callAPI.App::handleRequest
+      Description: Call API
+      Role: !GetAtt LambdaRoleForRuleExecutionAndSQS.Arn
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt QueueCallAPI.Arn
+            BatchSize: 1
+            Enabled: true
+
+  RDSDatabaseFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-write-RDS
+      CodeUri: functions/RDSDatabase
+      Handler: RDSDatabase.src.main.java.rdsDatabase.App::handleRequest
+      Description: Writes to the database
+  #      vpc: ... # our VPC info so we can connect to RDS
+      Role: !GetAtt LambdaRoleForRuleExecutionAndSQS.Arn
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt QueueRDSDatabase.Arn
+            BatchSize: 1
+            Enabled: true
+
+  StateMachineTriggerAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: dev
+      Name: !Sub ${AWS::StackName}-api
+      # Auth: # To control auth for your api
+      #   ApiKeyRequired: true
+      DefinitionBody:
+        'Fn::Transform':
+          Name: AWS::Include
+          Parameters:
+            # s3 location of the swagger file
+            Location: s3://my-api-documents/new_swagger.yaml #s3://my-api-documents/swagger.yaml #!Ref SwaggerS3File
+
+Outputs:
+  SNSSQSStateMachine:
+    Description: "State machine ARN"
+    Value: !GetAtt SNSSQSStateMachine.Arn
+
+
+
+
+
+

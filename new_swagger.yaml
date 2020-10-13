@@ -1,0 +1,268 @@
+openapi: 3.0.0
+info:
+  version: '1.0'
+  title: "pit-jv-lambda-examples"
+  description: POC API
+  license:
+    name: MIT
+
+x-amazon-apigateway-request-validators:
+  Validate body:
+    validateRequestParameters: false
+    validateRequestBody: true
+  params:
+    validateRequestParameters: true
+    validateRequestBody: false
+  Validate body, query string parameters, and headers:
+    validateRequestParameters: true
+    validateRequestBody: true
+
+paths:
+  /execute:
+    options:
+      x-amazon-apigateway-integration:
+        type: mock
+        requestTemplates:
+          application/json: |
+            {
+              "statusCode" : 200
+            }
+        responses:
+          "default":
+            statusCode: "200"
+            responseParameters:
+              method.response.header.Access-Control-Allow-Headers:
+                Fn::Sub: ${CorsHeaders}
+              method.response.header.Access-Control-Allow-Methods:
+                Fn::Sub: ${CorsMethods}
+              method.response.header.Access-Control-Allow-Origin:
+                Fn::Sub: ${CorsOrigin}
+            responseTemplates:
+              application/json: |
+                {}
+      responses:
+        200:
+          $ref: '#/components/responses/200Cors'
+    post:
+      security:
+      - api_key: []
+      x-amazon-apigateway-integration:
+        credentials:
+          Fn::GetAtt: [ ApiGatewayStepFunctionsRole, Arn ]
+        uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:states:action/StartExecution
+        httpMethod: POST
+        type: aws
+        responses:
+          default:
+            statusCode: 200
+            responseParameters:
+              method.response.header.Access-Control-Allow-Headers:
+                Fn::Sub: ${CorsHeaders}
+              method.response.header.Access-Control-Allow-Origin:
+                Fn::Sub: ${CorsOrigin}
+          ".*CREATION_FAILED.*":
+            statusCode: 403
+            responseParameters:
+              method.response.header.Access-Control-Allow-Headers:
+                Fn::Sub: ${CorsHeaders}
+              method.response.header.Access-Control-Allow-Origin:
+                Fn::Sub: ${CorsOrigin}
+            responseTemplates:
+              application/json: $input.path('$.errorMessage')
+        requestTemplates:
+          application/json:
+            Fn::Sub: |-
+              {
+                "input": "$util.escapeJavaScript($input.json('$'))",
+                "name": "$context.requestId",
+                "stateMachineArn": "${SNSSQSStateMachine}"
+              }
+      summary: Start SNSSQSStateMachine
+      responses:
+        200:
+          $ref: '#/components/responses/200Empty'
+        403:
+          $ref: '#/components/responses/Error'
+  /history:
+    options:
+      x-amazon-apigateway-integration:
+        type: mock
+        requestTemplates:
+          application/json: |
+            {
+              "statusCode" : 200
+            }
+        responses:
+          "default":
+            statusCode: "200"
+            responseParameters:
+              method.response.header.Access-Control-Allow-Headers:
+                Fn::Sub: ${CorsHeaders}
+              method.response.header.Access-Control-Allow-Methods:
+                Fn::Sub: ${CorsMethods}
+              method.response.header.Access-Control-Allow-Origin:
+                Fn::Sub: ${CorsOrigin}
+            responseTemplates:
+              application/json: |
+                {}
+      responses:
+        200:
+          $ref: '#/components/responses/200Cors'
+    post:
+      security:
+      - api_key: []      
+      x-amazon-apigateway-integration:
+        credentials:
+          Fn::GetAtt: [ ApiGatewayStepFunctionsRole, Arn ]
+        uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:states:action/GetExecutionHistory
+        httpMethod: POST
+        type: aws
+        responses:
+          default:
+            statusCode: 200
+          ".*MISSING_AUTHENTICATION_TOKEN.*":
+            statusCode: 403
+            responseTemplates:
+              application/json: $input.path('$.errorMessage')
+          ".*NOT_FOUND.*":
+            statusCode: 404
+            responseTemplates:
+              application/json: $input.path('$.errorMessage')
+        requestTemplates:
+          application/json:
+            Fn::Sub: |-
+              #set($inputRoot = $input.path('$'))
+              {
+                "executionArn": "$inputRoot.executionArn",
+                "includeExecutionData": true,
+                "maxResults": 100,
+                "reverseOrder": false
+              }
+      summary: Get history of SNSSQSStateMachine
+      responses:
+        200:
+          $ref: '#/components/responses/200Empty'
+        403:
+          $ref: '#/components/responses/Error'
+        404:
+          $ref: '#/components/responses/Error'
+  /workflow/{executionId}:
+    options:
+      x-amazon-apigateway-integration:
+        type: mock
+        requestTemplates:
+          application/json: |
+            {
+              "statusCode" : 200
+            }
+        responses:
+          default:
+            statusCode: 200
+            responseParameters:
+              method.response.header.Access-Control-Allow-Headers:
+                Fn::Sub: ${CorsHeaders}
+              method.response.header.Access-Control-Allow-Methods:
+                Fn::Sub: ${CorsMethods}
+              method.response.header.Access-Control-Allow-Origin:
+                Fn::Sub: ${CorsOrigin}
+            responseTemplates:
+              application/json: |
+                {}
+          ".*MISSING_AUTHENTICATION_TOKEN.*":
+            statusCode: 403
+            responseTemplates:
+              application/json: $input.path('$.errorMessage')
+          ".*NOT_FOUND.*":
+            statusCode: 404
+            responseTemplates:
+              application/json: $input.path('$.errorMessage')
+      responses:
+        200:
+          $ref: '#/components/responses/200Cors'
+        403:
+          $ref: '#/components/responses/Error'
+        404:
+          $ref: '#/components/responses/Error'
+    get:
+      security:
+      - api_key: []
+      x-amazon-apigateway-integration:
+        credentials:
+          Fn::GetAtt: [ ApiGatewayStepFunctionsRole, Arn ]
+        uri:
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:states:action/DescribeExecution
+        httpMethod: POST
+        type: aws          
+        responses:
+          default:
+            statusCode: 200
+            responseTemplates:
+              application/json: |-
+                #set ($status = $input.json('status'))
+                {
+                #if($status == '"SUCCEEDED"')
+                  "output": $util.parseJson($input.json('output')),
+                #end
+                  "status": $status
+                }
+        requestTemplates:
+          application/json:
+            Fn::Sub: |-
+              {
+                "executionArn": "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:${SNSSQSStateMachine.Name}:$input.params().path.get('executionId')"
+              }
+      summary: Get execution status
+      responses:
+        200:
+          $ref: '#/components/responses/200Empty'
+security: # global
+  - api_key: []
+
+components:
+  securitySchemes:
+    api_key:
+      type: "apiKey"
+      name: "x-api-key"
+      in: "header"
+  schemas:
+    Error:
+      title: Error
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+
+  responses:
+    200Empty:
+      description: Default OK response
+
+    200Cors:
+      description: Default response for CORS method
+      headers:
+        Access-Control-Allow-Headers:
+          schema:
+            type: "string"
+        Access-Control-Allow-Methods:
+          schema:
+            type: "string"
+        Access-Control-Allow-Origin:
+          schema:
+            type: "string"
+
+    Error:
+      description: Error Response
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+      headers:
+        Access-Control-Allow-Headers:
+          schema:
+            type: "string"
+        Access-Control-Allow-Origin:
+          schema:
+            type: "string" 
